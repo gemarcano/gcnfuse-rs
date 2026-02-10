@@ -8,4 +8,4 @@ clap = { version = "4.5.53", features = ["derive"] }
 fuser = "0.16.0"
 gcn_disk = "0.3.1"
 libc = "0.2.180"
-rvz = "0.2.0"
+rvz = "0.2.1"

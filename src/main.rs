@@ -5,17 +5,16 @@ use clap::Parser;
 use fuser::FileAttr;
 use fuser::FileType;
 use fuser::Filesystem;
-use fuser::MountOption;
 use fuser::ReplyAttr;
 use fuser::ReplyData;
 use fuser::ReplyDirectory;
 use fuser::ReplyEntry;
-use fuser::ReplyOpen;
 use fuser::Request;
 use gcn_disk::Disc;
 use gcn_disk::Entry;
 use gcn_disk::Fst;
 use rvz::Rvz;
+use std::cmp;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -25,10 +24,51 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use gcn_disk;
-use libc;
-use std::cmp;
-use std::io;
+#[derive(Copy, Clone, Debug)]
+struct Inode(u64);
+
+#[derive(Copy, Clone, Debug)]
+struct Index(u32);
+
+impl From<u32> for Index {
+    fn from(val: u32) -> Self {
+        Self(val)
+    }
+}
+
+impl From<Index> for u32 {
+    fn from(val: Index) -> Self {
+        val.0
+    }
+}
+
+impl From<u64> for Inode {
+    fn from(val: u64) -> Self {
+        Self(val)
+    }
+}
+
+impl From<Inode> for u64 {
+    fn from(val: Inode) -> Self {
+        val.0
+    }
+}
+
+impl From<Inode> for Index {
+    fn from(val: Inode) -> Self {
+        // FST can only have u32 worth of inodes/entries, so this cast is guaranteed to work
+        #[allow(clippy::cast_possible_truncation)]
+        ((val.0 - 1) as u32).into()
+    }
+}
+
+impl From<Index> for Inode {
+    fn from(val: Index) -> Self {
+        // FST can only have u32 worth of inodes/entries, so this cast is guaranteed to work
+        #[allow(clippy::cast_possible_truncation)]
+        (u64::from(val.0) + 1).into()
+    }
+}
 
 #[derive(Parser)]
 struct Args {
@@ -42,13 +82,13 @@ struct GcnFuse<T: Read + Seek> {
 }
 
 impl<T: Read + Seek> GcnFuse<T> {
-    fn new(io: T, disc: Disc) -> Self {
-        GcnFuse { io, disc }
+    const fn new(io: T, disc: Disc) -> Self {
+        Self { io, disc }
     }
 }
 
-fn get_attr(fs: &Fst, index: u32) -> FileAttr {
-    let entry = &fs.entries[index as usize];
+fn get_attr(fs: &Fst, index: Index) -> FileAttr {
+    let entry = &fs.entries[usize::try_from(u32::from(index)).unwrap()];
     let mut attr = FileAttr {
         ino: 0,
         size: 0,
@@ -68,46 +108,51 @@ fn get_attr(fs: &Fst, index: u32) -> FileAttr {
     };
     match entry {
         Entry::File(file) => {
-            attr.ino = (index + 1).into();
+            attr.ino = Inode::from(index).into();
             attr.size = file.size.into();
             attr.blocks = ((file.size / 512) + 1).into();
         }
         Entry::Directory(directory) => {
             attr.nlink = 2;
-            attr.ino = (index + 1).into();
+            attr.ino = Inode::from(index).into();
             attr.kind = FileType::Directory;
-            let subdirs = fs.entries[(directory.index + 1) as usize..directory.end_index as usize]
+            let index_start = usize::try_from(directory.index + 1).unwrap();
+            let index_end = usize::try_from(directory.end_index).unwrap();
+            #[allow(clippy::cast_possible_truncation)]
+            let subdirs = fs.entries[index_start..index_end]
                 .iter()
                 .filter(|&e| matches!(e, Entry::Directory(_)))
-                .count();
-            attr.nlink += subdirs as u32;
+                .count() as u32; // This cast is fine, index_start..index_end is u32
+            attr.nlink += subdirs;
             attr.perm = 0o555;
         }
     }
     attr
 }
 
-fn get_entry(fs: &Fst, inode: u64) -> &Entry {
-    &fs.entries[(inode - 1) as usize]
+#[must_use]
+fn get_entry(fs: &Fst, inode: Inode) -> &Entry {
+    &fs.entries[usize::try_from(u32::from(Index::from(inode))).unwrap()]
 }
 
 impl<T: Read + Seek> Filesystem for GcnFuse<T> {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        println!("lookup {parent} {}", name.to_str().unwrap());
+        let parent: Inode = parent.into();
+        println!("lookup {} {}", parent.0, name.to_str().unwrap());
         let parent_entry = get_entry(&self.disc.filesystem, parent);
-        let parent = if let Entry::Directory(parent) = parent_entry {
-            parent
-        } else {
+        let Entry::Directory(parent) = parent_entry else {
             reply.error(libc::EIO);
             return;
         };
 
-        let mut index = parent.index + 1;
-        while index < parent.end_index {
-            let current_inode = index + 1;
-            let entry_name = self.disc.filesystem.get_filename(&mut self.io, index);
-            if entry_name.is_err() {
-                let error = entry_name.unwrap_err();
+        let mut index: Index = (parent.index + 1).into();
+        while u32::from(index) < parent.end_index {
+            let current_inode: Inode = index.into();
+            let entry_name = self
+                .disc
+                .filesystem
+                .get_filename(&mut self.io, index.into());
+            if let Err(error) = entry_name {
                 match error {
                     gcn_disk::Error::Io(err) => {
                         if let Some(err) = err.raw_os_error() {
@@ -125,20 +170,21 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
                 return;
             }
 
-            let current_entry = get_entry(&self.disc.filesystem, current_inode.into());
+            let current_entry = get_entry(&self.disc.filesystem, current_inode);
             match current_entry {
                 Entry::File(_) => {
-                    index += 1;
+                    index = (u32::from(index) + 1).into();
                 }
                 Entry::Directory(directory) => {
-                    index = directory.end_index;
+                    index = directory.end_index.into();
                 }
             }
         }
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let attr = get_attr(&self.disc.filesystem, (ino - 1) as u32);
+        let ino: Inode = ino.into();
+        let attr = get_attr(&self.disc.filesystem, ino.into());
         reply.attr(&Duration::from_secs(1), &attr);
     }
 
@@ -150,7 +196,8 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        println!("readdir {ino} {offset}");
+        let ino: Inode = ino.into();
+        println!("readdir {} {offset}", ino.0);
         let entry = get_entry(&self.disc.filesystem, ino);
         let entry = match entry {
             Entry::File(_) => {
@@ -165,17 +212,20 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
             (ino, FileType::Directory, "..".to_string()),
         ];
 
-        let mut index = ino as u32;
-        while index < entry.end_index {
-            let sub_entry = &self.disc.filesystem.entries[index as usize];
-            let inode = index + 1;
+        let mut index: Index = (u32::from(Index::from(ino)) + 1).into();
+        while u32::from(index) < entry.end_index {
+            let sub_entry =
+                &self.disc.filesystem.entries[usize::try_from(u32::from(index)).unwrap()];
+            let inode: Inode = index.into();
             let type_ = match sub_entry {
                 Entry::File(_) => FileType::RegularFile,
                 Entry::Directory(_) => FileType::Directory,
             };
-            let name = self.disc.filesystem.get_filename(&mut self.io, index);
-            if name.is_err() {
-                let error = name.unwrap_err();
+            let name = self
+                .disc
+                .filesystem
+                .get_filename(&mut self.io, index.into());
+            if let Err(error) = name {
                 match error {
                     gcn_disk::Error::Io(err) => {
                         if let Some(err) = err.raw_os_error() {
@@ -186,12 +236,12 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
                 }
                 return;
             }
-            entries.push((inode.into(), type_, name.unwrap()));
+            entries.push((inode, type_, name.unwrap()));
 
-            let current_entry = get_entry(&self.disc.filesystem, inode.into());
+            let current_entry = get_entry(&self.disc.filesystem, inode);
             match current_entry {
                 Entry::File(_) => {
-                    index += 1;
+                    index = (u32::from(index) + 1).into();
                 }
                 Entry::Directory(directory) => {
                     index = directory.end_index.into();
@@ -199,8 +249,11 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
             }
         }
 
-        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
+        let offset = usize::try_from(offset).unwrap();
+        for (i, entry) in entries.into_iter().enumerate().skip(offset) {
+            // There will always be u32 max entries, so there's no i64 possible wrapping
+            #[allow(clippy::cast_possible_wrap)]
+            if reply.add(entry.0.into(), (i + 1) as i64, entry.1, entry.2) {
                 break;
             }
         }
@@ -213,12 +266,13 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
         ino: u64,
         _fh: u64,
         offset: i64,
-        _size: u32,
+        size: u32,
         _flags: i32,
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        println!("read {ino} {offset}");
+        let ino: Inode = ino.into();
+        println!("read {} {offset}", ino.0);
         let entry = get_entry(&self.disc.filesystem, ino);
         let entry = match entry {
             Entry::File(file) => file,
@@ -228,7 +282,7 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
             }
         };
         let offset = entry.offset;
-        let read_size = cmp::min(_size, entry.size);
+        let read_size = cmp::min(size, entry.size);
         let mut buffer = vec![0; read_size as usize];
         self.io.seek(SeekFrom::Start(offset.into())).unwrap();
         self.io.read_exact(&mut buffer).unwrap();
