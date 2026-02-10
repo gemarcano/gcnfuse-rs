@@ -281,10 +281,14 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
                 return;
             }
         };
-        let offset = entry.offset;
         let read_size = cmp::min(size, entry.size);
         let mut buffer = vec![0; read_size as usize];
-        self.io.seek(SeekFrom::Start(offset.into())).unwrap();
+        println!("read {} 0x{:08X} 0x{offset:08X}", ino.0, entry.offset);
+        self.io
+            .seek(SeekFrom::Start(
+                u64::from(entry.offset).strict_add_signed(offset),
+            ))
+            .unwrap();
         self.io.read_exact(&mut buffer).unwrap();
         reply.data(&buffer);
     }
