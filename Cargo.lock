@@ -304,17 +304,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gcfuse-rs"
-version = "0.1.0"
-dependencies = [
- "clap",
- "fuser",
- "gcn_disk",
- "libc",
- "rvz",
-]
-
-[[package]]
 name = "gcn_disk"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -326,6 +315,17 @@ dependencies = [
  "encoding_rs",
  "num-traits",
  "png",
+ "rvz",
+]
+
+[[package]]
+name = "gcnfuse"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "fuser",
+ "gcn_disk",
+ "libc",
  "rvz",
 ]
 

@@ -1,5 +1,5 @@
 [package]
-name = "gcfuse-rs"
+name = "gcnfuse"
 version = "0.1.0"
 edition = "2024"
 
