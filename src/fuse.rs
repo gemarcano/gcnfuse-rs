@@ -128,10 +128,9 @@ fn get_entry(fs: &Fst, inode: Inode) -> &Entry {
 impl<T: Read + Seek> Filesystem for GcnFuse<T> {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let parent: Inode = parent.into();
-        println!("lookup {} {}", parent.0, name.to_str().unwrap());
         let parent_entry = get_entry(&self.disc.filesystem, parent);
         let Entry::Directory(parent) = parent_entry else {
-            println!("Error 1");
+            eprintln!("parent inode does not point to a directory");
             reply.error(libc::EIO);
             return;
         };
@@ -144,7 +143,6 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
                 .filesystem
                 .get_filename(&mut self.io, index.into());
             if let Err(error) = entry_name {
-                println!("Error 2");
                 match error {
                     gcn_disk::Error::Io(err) => {
                         if let Some(err) = err.raw_os_error() {
@@ -157,7 +155,6 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
             }
             let entry_name = entry_name.unwrap();
             if entry_name.as_str() == name {
-                println!("found match");
                 let attr = get_attr(&self.disc.filesystem, index);
                 reply.entry(&Duration::from_secs(1), &attr, 0);
                 return;
@@ -191,7 +188,6 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
         mut reply: ReplyDirectory,
     ) {
         let ino: Inode = ino.into();
-        println!("readdir {} {offset}", ino.0);
         let entry = get_entry(&self.disc.filesystem, ino);
         let entry = match entry {
             Entry::File(_) => {
@@ -268,7 +264,6 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
         reply: ReplyData,
     ) {
         let ino: Inode = ino.into();
-        println!("read {} {offset}", ino.0);
         let entry = get_entry(&self.disc.filesystem, ino);
         let entry = match entry {
             Entry::File(file) => file,
@@ -283,7 +278,6 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
         let offset = offset as u32;
         let read_size = cmp::min(size, entry.size - offset);
         let mut buffer = vec![0; read_size as usize];
-        println!("read {} 0x{:08X} 0x{offset:08X}", ino.0, entry.offset);
         self.io
             .seek(SeekFrom::Start(
                 u64::from(entry.offset).strict_add(offset.into()),

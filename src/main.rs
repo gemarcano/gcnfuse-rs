@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Gabriel Marcano <gabemarcano@yahoo.com>
 
 use clap::Parser;
+use fuser::MountOption;
 use gcn_disk::Disc;
 use gcnfuse::GcnFuse;
 use rvz::Rvz;
@@ -20,7 +21,6 @@ fn main() {
     let mut file = Rvz::new(file).expect("error opening RVZ");
     let disc = Disc::new(&mut file).unwrap();
     let gcn_fuse = GcnFuse::new(file, disc);
-
-    println!("Hello, world!");
-    fuser::mount2(gcn_fuse, args.mount, &[]).unwrap();
+    let options = vec![MountOption::RO];
+    fuser::mount2(gcn_fuse, args.mount, &options).unwrap();
 }
