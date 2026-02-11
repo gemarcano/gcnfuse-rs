@@ -149,7 +149,14 @@ impl<T: Read + Seek> Filesystem for GcnFuse<T> {
                             reply.error(err);
                         }
                     }
-                    _ => reply.error(libc::EIO),
+                    gcn_disk::Error::Utf8(err) => {
+                        eprintln!("{err}");
+                        reply.error(libc::EIO);
+                    }
+                    gcn_disk::Error::Parse(msg) => {
+                        eprintln!("{msg}");
+                        reply.error(libc::EIO);
+                    }
                 }
                 return;
             }
